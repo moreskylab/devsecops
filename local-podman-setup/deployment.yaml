@@ -1,0 +1,104 @@
+# =============================================================================
+# DevSecOps Demo — Podman Play Kube Deployment
+# All containers in a single pod for local development
+# Launch with: podman play kube deployment.yaml
+# =============================================================================
+apiVersion: v1
+kind: Pod
+metadata:
+  name: devsecops
+  labels:
+    app: devsecops
+spec:
+  containers:
+    # --- PostgreSQL ---
+    - name: postgres
+      image: postgres:17-alpine
+      ports:
+        - containerPort: 5432
+          hostPort: 5432
+      env:
+        - name: POSTGRES_USER
+          value: postgres
+        - name: POSTGRES_PASSWORD
+          value: postgres
+        - name: POSTGRES_DB
+          value: items
+      volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+
+    # --- Grafana LGTM Stack ---
+    - name: lgtm
+      image: grafana/otel-lgtm:latest
+      ports:
+        - containerPort: 3000
+          hostPort: 3000
+        - containerPort: 3100
+          hostPort: 3100
+        - containerPort: 9090
+          hostPort: 9090
+
+    # --- Grafana Alloy ---
+    - name: alloy
+      image: grafana/alloy:latest
+      args:
+        - run
+        - /etc/alloy/config.alloy
+        - --server.http.listen-addr=0.0.0.0:12345
+      ports:
+        - containerPort: 4317
+          hostPort: 4317
+        - containerPort: 4318
+          hostPort: 4318
+        - containerPort: 4040
+          hostPort: 4040
+        - containerPort: 12345
+          hostPort: 12345
+      volumeMounts:
+        - name: alloy-config
+          mountPath: /etc/alloy
+
+    # --- Backend (Python FastAPI) ---
+    - name: backend
+      image: docker.io/moreskylab/backend:1.0.0
+      ports:
+        - containerPort: 8000
+          hostPort: 8000
+      env:
+        - name: DATABASE_URL
+          value: postgresql://postgres:postgres@localhost:5432/items
+        - name: ALLOWED_ORIGIN
+          value: http://localhost:8080
+        - name: ENABLE_OBSERVABILITY
+          value: "true"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://localhost:4317
+        - name: PYROSCOPE_SERVER
+          value: http://localhost:4040
+        - name: WEB_CONCURRENCY
+          value: "2"
+        - name: PORT
+          value: "8000"
+
+    # --- Frontend (Nginx) ---
+    - name: frontend
+      image: docker.io/moreskylab/frontend:1.0.0
+      ports:
+        - containerPort: 8080
+          hostPort: 8080
+      volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx/conf.d
+
+  volumes:
+    - name: postgres-data
+      emptyDir: {}
+    - name: alloy-config
+      hostPath:
+        path: ./config.alloy
+        type: File
+    - name: nginx-config
+      hostPath:
+        path: ./nginx.conf
+        type: File

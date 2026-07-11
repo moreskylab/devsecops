@@ -1,0 +1,78 @@
+// Grafana Alloy — OTel Collector Pipeline Configuration
+//
+// Receives telemetry from frontend (HTTP) and backend (gRPC),
+// then exports to the Grafana LGTM stack.
+
+// =============================================================================
+// Receivers
+// =============================================================================
+
+otelcol.receiver.otlp "default" {
+  grpc {
+    endpoint = "0.0.0.0:4317"
+  }
+
+  http {
+    endpoint = "0.0.0.0:4318"
+
+    // CORS for browser-based OTel exports
+    cors {
+      allowed_origins = ["*"]
+      allowed_headers = ["Content-Type", "traceparent", "tracestate"]
+    }
+  }
+
+  output {
+    metrics = [otelcol.processor.batch.default.input]
+    logs    = [otelcol.processor.batch.default.input]
+    traces  = [otelcol.processor.batch.default.input]
+  }
+}
+
+// =============================================================================
+// Processors
+// =============================================================================
+
+otelcol.processor.batch "default" {
+  timeout          = "5s"
+  send_batch_size  = 1024
+
+  output {
+    metrics = [otelcol.exporter.otlp.lgtm.input]
+    logs    = [otelcol.exporter.otlp.lgtm.input]
+    traces  = [otelcol.exporter.otlp.lgtm.input]
+  }
+}
+
+// =============================================================================
+// Exporters
+// =============================================================================
+
+// Traces + Logs + Metrics → LGTM via OTLP gRPC
+otelcol.exporter.otlp "lgtm" {
+  client {
+    endpoint = "lgtm:4317"
+
+    tls {
+      insecure = true
+    }
+  }
+}
+
+// =============================================================================
+// Pyroscope (Continuous Profiling)
+// =============================================================================
+
+pyroscope.receive_http "default" {
+  http {
+    listen_address = "0.0.0.0:4040"
+  }
+
+  forward_to = [pyroscope.write.lgtm.receiver]
+}
+
+pyroscope.write "lgtm" {
+  endpoint {
+    url = "http://lgtm:4040"
+  }
+}

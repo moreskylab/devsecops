@@ -1,0 +1,302 @@
+// =============================================================================
+// DevSecOps Demo — Jenkins Declarative Pipeline
+//
+// Full CI/CD pipeline with DevSecOps toolchain:
+//   Init → Vault → Gitleaks → Parallel (SAST/Lint/SCA/Build/Trivy)
+//   → DAST → Publish+Sign → Deploy → Notifications
+// =============================================================================
+
+pipeline {
+    agent any
+
+    environment {
+        DOCKER_REGISTRY = 'docker.io/moreskylab'
+        IMAGE_TAG       = "${BUILD_NUMBER}-${GIT_COMMIT.take(7)}"
+        VAULT_ADDR      = credentials('vault-addr')
+        VAULT_TOKEN     = credentials('vault-token')
+        SLACK_WEBHOOK   = credentials('slack-webhook')
+        COSIGN_KEY      = credentials('cosign-key')
+    }
+
+    options {
+        timestamps()
+        timeout(time: 30, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+
+    stages {
+
+        // -----------------------------------------------------------------
+        // Stage 1: Initialize & Notify
+        // -----------------------------------------------------------------
+        stage('Initialize') {
+            steps {
+                script {
+                    slackSend(
+                        channel: '#devsecops',
+                        color: '#439FE0',
+                        message: ":rocket: Build #${BUILD_NUMBER} started for `${env.BRANCH_NAME}` (<${BUILD_URL}|Open>)"
+                    )
+                }
+                sh 'echo "Build: ${IMAGE_TAG}"'
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // Stage 2: Vault Integration Test
+        // -----------------------------------------------------------------
+        stage('Vault Integration') {
+            steps {
+                sh '''
+                    vault status
+                    vault token lookup
+                '''
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // Stage 3: Global Secrets Scan (Gitleaks)
+        // -----------------------------------------------------------------
+        stage('Secrets Scan') {
+            steps {
+                sh '''
+                    gitleaks detect --source . --report-format json --report-path gitleaks-report.json --verbose
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'gitleaks-report.json', allowEmptyArchive: true
+                }
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // Stage 4: Parallel Security & Build
+        // -----------------------------------------------------------------
+        stage('Security & Build') {
+            parallel {
+
+                // --- Frontend Track ---
+                stage('Frontend') {
+                    stages {
+                        stage('Frontend SAST') {
+                            steps {
+                                sh '''
+                                    semgrep scan --config auto frontend/ \
+                                        --json --output frontend-semgrep.json || true
+                                '''
+                            }
+                            post {
+                                always {
+                                    archiveArtifacts artifacts: 'frontend-semgrep.json', allowEmptyArchive: true
+                                }
+                            }
+                        }
+                        stage('Frontend Lint') {
+                            steps {
+                                sh 'hadolint frontend/Dockerfile || true'
+                            }
+                        }
+                        stage('Frontend SCA') {
+                            steps {
+                                sh '''
+                                    grype dir:frontend/ \
+                                        --output json --file frontend-grype.json || true
+                                '''
+                            }
+                            post {
+                                always {
+                                    archiveArtifacts artifacts: 'frontend-grype.json', allowEmptyArchive: true
+                                }
+                            }
+                        }
+                        stage('Frontend Build') {
+                            steps {
+                                sh """
+                                    docker build -t ${DOCKER_REGISTRY}/frontend:${IMAGE_TAG} frontend/
+                                """
+                            }
+                        }
+                        stage('Frontend Trivy') {
+                            steps {
+                                sh """
+                                    trivy image --severity HIGH,CRITICAL \
+                                        --format json --output frontend-trivy.json \
+                                        ${DOCKER_REGISTRY}/frontend:${IMAGE_TAG} || true
+                                """
+                            }
+                            post {
+                                always {
+                                    archiveArtifacts artifacts: 'frontend-trivy.json', allowEmptyArchive: true
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // --- Backend Track ---
+                stage('Backend') {
+                    stages {
+                        stage('Backend SAST') {
+                            steps {
+                                sh '''
+                                    semgrep scan --config auto backend/ \
+                                        --json --output backend-semgrep.json || true
+                                '''
+                            }
+                            post {
+                                always {
+                                    archiveArtifacts artifacts: 'backend-semgrep.json', allowEmptyArchive: true
+                                }
+                            }
+                        }
+                        stage('Backend Lint') {
+                            steps {
+                                sh 'hadolint backend/Dockerfile || true'
+                            }
+                        }
+                        stage('Backend SCA') {
+                            steps {
+                                sh '''
+                                    grype dir:backend/ \
+                                        --output json --file backend-grype.json || true
+                                '''
+                            }
+                            post {
+                                always {
+                                    archiveArtifacts artifacts: 'backend-grype.json', allowEmptyArchive: true
+                                }
+                            }
+                        }
+                        stage('Backend Build') {
+                            steps {
+                                sh """
+                                    docker build -t ${DOCKER_REGISTRY}/backend:${IMAGE_TAG} backend/
+                                """
+                            }
+                        }
+                        stage('Backend Trivy + SBOM') {
+                            steps {
+                                sh """
+                                    trivy image --severity HIGH,CRITICAL \
+                                        --format json --output backend-trivy.json \
+                                        ${DOCKER_REGISTRY}/backend:${IMAGE_TAG} || true
+
+                                    trivy image --format cyclonedx \
+                                        --output backend-sbom.json \
+                                        ${DOCKER_REGISTRY}/backend:${IMAGE_TAG} || true
+                                """
+                            }
+                            post {
+                                always {
+                                    archiveArtifacts artifacts: 'backend-trivy.json,backend-sbom.json', allowEmptyArchive: true
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // Stage 5: DAST (main branch only)
+        // -----------------------------------------------------------------
+        stage('DAST') {
+            when {
+                branch 'main'
+            }
+            steps {
+                sh '''
+                    # Start the app stack for DAST scanning
+                    docker compose -f docs/docker-compose.yaml up -d --wait
+
+                    # Run OWASP ZAP baseline scan
+                    docker run --rm --network host \
+                        -v $(pwd)/zap-report:/zap/wrk:rw \
+                        ghcr.io/zaproxy/zaproxy:stable \
+                        zap-baseline.py -t http://localhost:8080 \
+                        -r zap-report.html -J zap-report.json || true
+
+                    docker compose -f docs/docker-compose.yaml down
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'zap-report/**', allowEmptyArchive: true
+                }
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // Stage 6: Publish & Sign
+        // -----------------------------------------------------------------
+        stage('Publish & Sign') {
+            when {
+                branch 'main'
+            }
+            steps {
+                sh """
+                    # Push images
+                    docker push ${DOCKER_REGISTRY}/backend:${IMAGE_TAG}
+                    docker push ${DOCKER_REGISTRY}/frontend:${IMAGE_TAG}
+
+                    # Sign with Cosign (Vault transit key)
+                    cosign sign --key hashivault://devsecops-signing-key \
+                        ${DOCKER_REGISTRY}/backend:${IMAGE_TAG}
+                    cosign sign --key hashivault://devsecops-signing-key \
+                        ${DOCKER_REGISTRY}/frontend:${IMAGE_TAG}
+
+                    # Attach SBOM attestation
+                    cosign attest --key hashivault://devsecops-signing-key \
+                        --predicate backend-sbom.json --type cyclonedx \
+                        ${DOCKER_REGISTRY}/backend:${IMAGE_TAG}
+                """
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // Stage 7: Deploy to Kubernetes
+        // -----------------------------------------------------------------
+        stage('Deploy') {
+            when {
+                branch 'main'
+            }
+            steps {
+                sh """
+                    # Update image tags in manifests
+                    sed -i 's|moreskylab/backend:.*|moreskylab/backend:${IMAGE_TAG}|g' k8s/all-in-one.yaml
+                    sed -i 's|moreskylab/frontend:.*|moreskylab/frontend:${IMAGE_TAG}|g' k8s/all-in-one.yaml
+
+                    kubectl apply -f k8s/all-in-one.yaml
+
+                    kubectl -n observability rollout status deployment/backend --timeout=120s
+                    kubectl -n observability rollout status deployment/frontend --timeout=120s
+                """
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Post: Cleanup & Notifications
+    // -----------------------------------------------------------------
+    post {
+        success {
+            slackSend(
+                channel: '#devsecops',
+                color: 'good',
+                message: ":white_check_mark: Build #${BUILD_NUMBER} *succeeded* for `${env.BRANCH_NAME}` (<${BUILD_URL}|Open>)"
+            )
+        }
+        failure {
+            slackSend(
+                channel: '#devsecops',
+                color: 'danger',
+                message: ":x: Build #${BUILD_NUMBER} *failed* for `${env.BRANCH_NAME}` (<${BUILD_URL}|Open>)"
+            )
+        }
+        always {
+            cleanWs()
+        }
+    }
+}

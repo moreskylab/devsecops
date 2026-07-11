@@ -1,0 +1,48 @@
+// Grafana Alloy — Local Podman Configuration
+// All services on localhost (single pod networking)
+
+otelcol.receiver.otlp "default" {
+  grpc {
+    endpoint = "0.0.0.0:4317"
+  }
+
+  http {
+    endpoint = "0.0.0.0:4318"
+
+    cors {
+      allowed_origins = ["*"]
+      allowed_headers = ["Content-Type", "traceparent", "tracestate"]
+    }
+  }
+
+  output {
+    metrics = [otelcol.exporter.otlp.lgtm.input]
+    logs    = [otelcol.exporter.otlp.lgtm.input]
+    traces  = [otelcol.exporter.otlp.lgtm.input]
+  }
+}
+
+otelcol.exporter.otlp "lgtm" {
+  client {
+    // In a pod, all containers share localhost
+    endpoint = "localhost:4317"
+
+    tls {
+      insecure = true
+    }
+  }
+}
+
+pyroscope.receive_http "default" {
+  http {
+    listen_address = "0.0.0.0:4040"
+  }
+
+  forward_to = [pyroscope.write.lgtm.receiver]
+}
+
+pyroscope.write "lgtm" {
+  endpoint {
+    url = "http://localhost:4040"
+  }
+}
