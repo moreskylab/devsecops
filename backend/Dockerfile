@@ -10,7 +10,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 # Copy application code
-COPY main.py ./
+COPY ./app ./app
 
 # ============================================================================
 # Stage 2: Runtime — distroless (no shell, non-root)
