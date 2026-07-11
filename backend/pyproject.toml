@@ -2,39 +2,33 @@
 name = "devsecops-backend"
 version = "1.0.0"
 description = "DevSecOps Demo — FastAPI Backend with OpenTelemetry Instrumentation"
-requires-python = ">=3.12"
+readme = "README.md"
+requires-python = ">=3.14"
 dependencies = [
-    # --- Framework ---
-    "fastapi>=0.115.0",
-    "uvicorn[standard]>=0.34.0",
+    "fastapi>=0.139.0",
+    "opentelemetry-api>=1.43.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.43.0",
+    "opentelemetry-instrumentation-fastapi>=0.64b0",
+    "opentelemetry-instrumentation-logging>=0.64b0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.64b0",
+    "opentelemetry-sdk>=1.43.0",
+    "psycopg2-binary>=2.9.12",
+    "pyroscope-io>=1.1.0",
+    "sqlmodel>=0.0.39",
+    "uvicorn[standard]>=0.51.0",
+]
 
-    # --- Database ---
-    "sqlmodel>=0.0.22",
-    "psycopg2-binary>=2.9.10",
-
-    # --- OpenTelemetry Core ---
-    "opentelemetry-api>=1.29.0",
-    "opentelemetry-sdk>=1.29.0",
-
-    # --- OTel Exporters (gRPC) ---
-    "opentelemetry-exporter-otlp-proto-grpc>=1.29.0",
-
-    # --- OTel Auto-Instrumentation ---
-    "opentelemetry-instrumentation-fastapi>=0.50b0",
-    "opentelemetry-instrumentation-sqlalchemy>=0.50b0",
-    "opentelemetry-instrumentation-logging>=0.50b0",
-
-    # --- Profiling (Linux-only at runtime) ---
-    "pyroscope-io>=0.8.7",
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+    "ruff>=0.15.21",
 ]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.uv]
-dev-dependencies = [
-    "httpx>=0.28.0",
-    "pytest>=8.3.0",
-    "ruff>=0.8.0",
-]
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
